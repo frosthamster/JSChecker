@@ -4,60 +4,38 @@ const fs = Promise.promisifyAll(require('fs'));
 const tar = require('tar');
 const Docker = require('node-docker-api').Docker;
 const path = require('path');
-const tests = require('./tests');
-const SolutionReport = require('./solutionReport');
+const TestSets = require('./models/TestSets');
+const SolutionReport = require('./models/SolutionReport');
+const config = require('./TestsExecutorConfig');
+const streamToPromise = require('stream-to-promise');
 
-function promisifyStream(stream, out) {
-    return new Promise((resolve, reject) => {
-        let data = '';
-        stream.on('data', (d) => data += d.toString().slice(8));
-        stream.on('end', () => {
-            out.push(data);
-            resolve();
-        });
-        stream.on('error', reject)
-    });
-}
-
-function executeSequentially(promiseFactories) {
-    let result = Promise.resolve();
-    promiseFactories.forEach((pf) => {
-        result = result.then(pf)
-    });
-    return result;
-}
-
-function getCmdFactory(command, container, out) {
+function getCmdFactory(command, container) {
     return () => {
-        let outLen = out.length;
         return Promise.resolve()
             .then(() => container.exec.create({Cmd: command.split(' '), AttachStdout: true, AttachStderr: true}))
             .then((exec) => exec.start({Detach: false}))
-            .then((stream) => promisifyStream(stream, out))
-            .then(() => {
-                if (outLen === out.length)
-                    out.push('');
-            });
-    }
+            .then((stream) => streamToPromise(stream))
+            .then((data) => data.toString().slice(8).replace(config.STREAM_DELIMITER, ''));
+    };
 }
 
-function execute(sourceFile, testSuite) {
-    if (testSuite.runInDocker !== true)
+function execute(testSuite, sourceFile) {
+    if (!testSuite.runInDocker)
         throw new Error('This test suite is not designed to run in a docker');
 
-    const docker = new Docker({socketPath: '/var/run/docker.sock'});
+    const docker = new Docker({socketPath: config.DOCKER_SOCK_PATH});
     let _container;
     let sourceFileTar = `${path.basename(sourceFile)}.tar`;
     let results = [];
 
     return docker.container.create({
         Image: 'node:8',
-        Cmd: ['/bin/bash', '-c', 'tail -f /var/log/dmesg'],
-        name: 'test'
+        Cmd: ['/bin/bash', '-c', 'tail -f /var/log/dmesg']
     })
-        .then((container) => container.start())
-        .then((container) => _container = container)
-
+        .then((container) => {
+            _container = container;
+            return container.start();
+        })
         .then(() => {
             let files = [sourceFile];
             if (testSuite.files)
@@ -65,56 +43,57 @@ function execute(sourceFile, testSuite) {
             return tar.create({file: sourceFileTar}, files)
         })
         .then(() => _container.fs.put(sourceFileTar, {path: '/'}))
-        .then(() => fs.unlinkAsync(sourceFileTar))
-
         .then(() => {
             let testCmdFactories = [];
-            for (let i = 0; i < testSuite.tests.length; i++) {
-                let test = testSuite.tests[i];
+            testSuite.tests.map((test) => {
                 let cmd = test.input;
-                if (test.fullCommand !== true)
+                if (!test.fullCommand)
                     cmd = `node ${sourceFile} ${cmd}`;
-                testCmdFactories.push(getCmdFactory(cmd, _container, results))
-            }
-            return executeSequentially(testCmdFactories);
+                testCmdFactories.push(getCmdFactory(cmd, _container))
+            });
+            return testCmdFactories.reduce((x, y) => x.then(y).then(d => results.push(d)), Promise.resolve());
         })
-
-        .then(() => _container.kill())
-        .then(() => _container.delete({force: true}))
-        .then(() => results)
-        .catch((error) => console.log(error));
+        .catch((error) => console.log(error))
+        .then(() => {
+            fs.unlinkAsync(sourceFileTar);
+            _container.kill();
+            _container.delete({force: true});
+            return results
+        });
 }
 
-function runTests(sourceFile, testSuite) {
-    return execute(sourceFile, testSuite)
+function runTests(testSuite, sourceFile) {
+    return execute(testSuite, sourceFile)
         .then((results) => {
             let testsPassed = true;
-            let description = 'All tests passed';
+            let description = '';
 
-            for (let i = 0; i < testSuite.tests.length; i++) {
-                let test = testSuite.tests[i];
-                let expectedOut = test.output;
-                let out = results[i];
-                let equal = (x, y) => x === y;
+            testSuite.tests.map((test, i) => {
+                if (!testsPassed)
+                    return;
+                let comparer = test.comparer;
 
-                if (test.floatCompare) {
-                    expectedOut = Number(expectedOut);
-                    out = Number(out);
-                    equal = (x, y) => Math.abs(x - y) < 1e-3;
-                }
+                let expectedOut = comparer.parse(test.output);
+                let out = comparer.parse(results[i]);
 
-                if (!equal(out, expectedOut)) {
-                    testsPassed = false;
-                    description = `Fails on test: ${test.errorDescription}\n\nExpected out: ${expectedOut}\nOut: ${results[i]}`;
-                    break;
-                }
-            }
+                testsPassed = comparer.equals(out, expectedOut) || test.freeOutput;
+                if (!test.hideLog)
+                    description += testsPassed ?
+                        `Test ${test.errorDescription}: success\n` :
+
+                        `Fails on test: ${test.errorDescription}\n\n
+                        Expected out: ${expectedOut}\n
+                        Out: ${results[i]}`;
+            });
+
+            if (testsPassed)
+                description += 'All tests passed\n';
 
             return new SolutionReport(testsPassed, description);
         })
         .catch((err) => console.log(err));
 }
 
-runTests('./solutions/entropy.js', tests.entropyTestSuite)
+runTests(TestSets.entropyTestSuite, './solutions/entropy.js')
     .then((sr) => console.log(sr.description))
     .catch((err) => console.log(err));

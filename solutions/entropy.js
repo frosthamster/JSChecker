@@ -1,27 +1,28 @@
-var chunk = process.argv[2];
+function getEntropy(input) {
+    let valuesCounts = [];
+    let i;
+    for (i = 0; i < input.length; i++) {
+        let currentSymbol = input.charAt(i);
 
-var valuesCounts = [];
-var i;
-for (i = 0; i < chunk.length; i++) {
-    var currentSymbol = chunk.charAt(i);
+        if (valuesCounts[currentSymbol] === undefined)
+            valuesCounts[currentSymbol] = 0;
 
-    if (valuesCounts[currentSymbol] == undefined)
-        valuesCounts[currentSymbol] = 0;
-
-    valuesCounts[currentSymbol]++;
-}
-
-var alphabetPower = 0;
-for (i in valuesCounts)
-    alphabetPower++;
-
-var enthropy = 0;
-if (alphabetPower > 1)
-    for (i in valuesCounts) {
-        var probability = valuesCounts[i] / chunk.length;
-        //брал логарифм по основанию мощности алфавита, а не 2
-        enthropy += probability * Math.log(probability) / Math.log(alphabetPower);
+        valuesCounts[currentSymbol]++;
     }
 
-enthropy *= -1;
-console.log(enthropy);
+    let alphabetPower = 0;
+    for (i in valuesCounts)
+        alphabetPower++;
+
+    let entropy = 0;
+    if (alphabetPower > 1)
+        for (i in valuesCounts) {
+            let probability = valuesCounts[i] / input.length;
+            entropy += probability * Math.log(probability) / Math.log(alphabetPower);
+        }
+
+    entropy *= -1;
+    return entropy;
+}
+
+console.log(getEntropy(process.argv[2]));

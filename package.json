@@ -4,6 +4,7 @@
   "dependencies": {
     "bluebird": "^3.5.0",
     "node-docker-api": "^1.1.16",
+    "stream-to-promise": "^2.2.0",
     "tar": "^4.0.1"
   }
 }
